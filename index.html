@@ -149,6 +149,22 @@
   }
   .delete-btn:hover { opacity: 1; }
 
+  .image-picker { display: flex; align-items: center; gap: 14px; }
+  .image-preview {
+    width: 72px; height: 72px;
+    border-radius: 8px;
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--bone-dim);
+    font-size: 24px;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .image-preview img { width: 100%; height: 100%; object-fit: cover; }
+  .image-picker-actions { display: flex; flex-direction: column; gap: 6px; }
+  .sigil img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+
   .empty {
     text-align: center;
     padding: 60px 20px;
@@ -328,17 +344,110 @@ function saveState() {
   }
 }
 
+// Guarda en qué pantalla te quedaste, para volver ahí al reabrir la app
+const VIEW_KEY = 'codice-view-v1';
+function saveViewState() {
+  try {
+    localStorage.setItem(VIEW_KEY, JSON.stringify({
+      view: state.view,
+      rosterTab: state.rosterTab,
+      activeId: state.activeId,
+    }));
+  } catch (err) { /* no crítico */ }
+}
+
 function loadState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
-    const data = JSON.parse(raw);
-    state.characters = data.characters || [];
-    state.worlds = data.worlds || [];
-    state.userPersona = data.userPersona || null;
+    if (raw) {
+      const data = JSON.parse(raw);
+      state.characters = data.characters || [];
+      state.worlds = data.worlds || [];
+      state.userPersona = data.userPersona || null;
+    }
   } catch (err) {
     console.error('No se pudo cargar lo guardado:', err);
   }
+
+  // Restaura la pantalla en la que estabas, solo si sigue siendo válida
+  try {
+    const rawView = localStorage.getItem(VIEW_KEY);
+    if (rawView) {
+      const v = JSON.parse(rawView);
+      if (v.rosterTab === 'characters' || v.rosterTab === 'worlds') state.rosterTab = v.rosterTab;
+      if (v.view === 'chat' && state.characters.some(c => c.id === v.activeId)) {
+        state.view = 'chat';
+        state.activeId = v.activeId;
+      } else if (v.view === 'worldForm' && state.worlds.some(w => w.id === v.activeId)) {
+        state.view = 'worldForm';
+        state.activeId = v.activeId;
+      } else if (v.view === 'persona') {
+        state.view = 'persona';
+      }
+      // Para 'form' (crear personaje) no restauramos: no tiene datos guardables a medio llenar.
+    }
+  } catch (err) { /* no crítico */ }
+}
+
+// Lee una imagen elegida por el usuario y la comprime a un cuadrado pequeño
+// (para no llenar el almacenamiento del teléfono con fotos pesadas)
+function readImageCompressed(file, maxSize = 320) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('No se pudo leer la imagen'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Imagen inválida'));
+      img.onload = () => {
+        const size = Math.min(maxSize, Math.max(img.width, img.height));
+        const scale = size / Math.max(img.width, img.height);
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement('canvas');
+        // recorte cuadrado centrado
+        canvas.width = size; canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        const sx = (w - size) / -2, sy = (h - size) / -2;
+        ctx.drawImage(img, sx, sy, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.82));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// Crea el bloque de subida de imagen reutilizable para los 3 formularios
+function buildImagePicker(currentDataUrl) {
+  const wrap = document.createElement('div');
+  wrap.className = 'field';
+  wrap.innerHTML = `
+    <label>Imagen (opcional)</label>
+    <div class="image-picker">
+      <div class="image-preview" id="imgPreview">${currentDataUrl ? `<img src="${currentDataUrl}">` : '<span>+</span>'}</div>
+      <div class="image-picker-actions">
+        <input type="file" accept="image/*" id="imgInput" style="display:none">
+        <button type="button" class="btn btn-ghost" id="imgPickBtn">Elegir imagen</button>
+        ${currentDataUrl ? '<button type="button" class="btn btn-ghost" id="imgRemoveBtn">Quitar</button>' : ''}
+      </div>
+    </div>
+  `;
+  let value = currentDataUrl || null;
+  const input = wrap.querySelector('#imgInput');
+  const preview = wrap.querySelector('#imgPreview');
+  wrap.querySelector('#imgPickBtn').onclick = () => input.click();
+  input.onchange = async () => {
+    if (!input.files[0]) return;
+    try {
+      value = await readImageCompressed(input.files[0]);
+      preview.innerHTML = `<img src="${value}">`;
+    } catch (err) {
+      alert('No se pudo procesar esa imagen.');
+    }
+  };
+  const removeBtn = wrap.querySelector('#imgRemoveBtn');
+  if (removeBtn) removeBtn.onclick = () => { value = null; preview.innerHTML = '<span>+</span>'; };
+  return { el: wrap, getValue: () => value };
 }
 
 function sigilColor(name) {
@@ -349,6 +458,7 @@ function sigilColor(name) {
 }
 
 function render() {
+  saveViewState();
   const main = document.getElementById('main');
   const title = document.getElementById('headerTitle');
   const personaBtn = document.getElementById('personaBtn');
@@ -410,7 +520,7 @@ function renderRoster(main) {
       const item = document.createElement('div');
       item.className = 'roster-item';
       item.innerHTML = `
-        <div class="sigil" style="background:${sigilColor(c.nombre)}"></div>
+        <div class="sigil" style="background:${sigilColor(c.nombre)}">${c.imagen ? `<img src="${c.imagen}">` : ''}</div>
         <div class="meta">
           <div class="name">${escapeHtml(c.nombre)}</div>
           <div class="sub">${escapeHtml(c.etiquetas || 'sin etiquetas')}${c.worldId ? ' · ◇ ' + escapeHtml((state.worlds.find(w => w.id === c.worldId) || {}).nombre || '') : ''}</div>
@@ -451,7 +561,7 @@ function renderWorldsList(main) {
       const item = document.createElement('div');
       item.className = 'roster-item';
       item.innerHTML = `
-        <div class="sigil" style="background:${sigilColor(w.nombre)}"></div>
+        <div class="sigil" style="background:${sigilColor(w.nombre)}">${w.imagen ? `<img src="${w.imagen}">` : ''}</div>
         <div class="meta">
           <div class="name">${escapeHtml(w.nombre)}</div>
           <div class="sub">${escapeHtml(w.epoca || '—')} · ${escapeHtml(w.etiquetas || 'sin etiquetas')}</div>
@@ -482,6 +592,7 @@ function renderWorldForm(main) {
   const wrap = document.createElement('div');
   wrap.innerHTML = `
     <div class="field"><label>Nombre del mundo</label><input id="w-nombre" placeholder="Ej. Nueva Elysia, Año 2 D.C. (después del colapso)" value="${escapeHtml(w.nombre || '')}"></div>
+    <div id="img-picker-slot"></div>
     <div class="field"><label>Época / ambientación</label><input id="w-epoca" placeholder="Ej. post-apocalíptico, medieval, cyberpunk..." value="${escapeHtml(w.epoca || '')}"></div>
     <div class="field">
       <label>Descripción</label>
@@ -499,12 +610,15 @@ function renderWorldForm(main) {
     </div>
   `;
   main.appendChild(wrap);
+  const imgPicker = buildImagePicker(w.imagen || null);
+  wrap.querySelector('#img-picker-slot').replaceWith(imgPicker.el);
 
   document.getElementById('saveWorldBtn').onclick = () => {
     const nombre = document.getElementById('w-nombre').value.trim();
     if (!nombre) { alert('El nombre del mundo es obligatorio.'); return; }
     const data = {
       nombre,
+      imagen: imgPicker.getValue(),
       epoca: document.getElementById('w-epoca').value.trim(),
       descripcion: document.getElementById('w-descripcion').value.trim(),
       prompt: document.getElementById('w-prompt').value.trim(),
@@ -547,6 +661,7 @@ function renderPersonaForm(main) {
       <label>¿Quién eres tú en las conversaciones?</label>
       <input id="p-nombre" placeholder="Nombre de tu personaje" value="${escapeHtml(p.nombre || '')}">
     </div>
+    <div id="img-picker-slot"></div>
     <div class="field"><label>Raza</label><input id="p-tipo" placeholder="Ej. humano, animal, híbrido, semi-humano, monstruo, licántropo, dragón..." value="${escapeHtml(p.tipo || '')}"></div>
     <div class="row2">
       <div class="field"><label>Género</label><input id="p-genero" value="${escapeHtml(p.genero || '')}"></div>
@@ -567,6 +682,8 @@ function renderPersonaForm(main) {
     </p>
   `;
   main.appendChild(wrap);
+  const imgPicker = buildImagePicker(p.imagen || null);
+  wrap.querySelector('#img-picker-slot').replaceWith(imgPicker.el);
 
   document.getElementById('savePersonaBtn').onclick = () => {
     const nombre = document.getElementById('p-nombre').value.trim();
@@ -575,6 +692,7 @@ function renderPersonaForm(main) {
     } else {
       state.userPersona = {
         nombre,
+        imagen: imgPicker.getValue(),
         tipo: document.getElementById('p-tipo').value.trim(),
         genero: document.getElementById('p-genero').value.trim(),
         edad: document.getElementById('p-edad').value.trim(),
@@ -602,6 +720,7 @@ function renderForm(main) {
   const wrap = document.createElement('div');
   wrap.innerHTML = `
     <div class="field"><label>Nombre</label><input id="f-nombre" placeholder="Ej. Sigurd Kolbjørnsen"></div>
+    <div id="img-picker-slot"></div>
     <div class="field"><label>Apariencia</label><textarea id="f-apariencia" rows="3" placeholder="Rasgos físicos distintivos, complexión, altura en metros..."></textarea></div>
     <div class="field"><label>Descripción</label><textarea id="f-descripcion" rows="4" placeholder="Personalidad, historia, contradicciones..."></textarea></div>
     <div class="field"><label>Saludo inicial</label><textarea id="f-saludo" rows="2" placeholder="Lo primero que dice tu personaje al empezar a hablar contigo..."></textarea></div>
@@ -619,6 +738,8 @@ function renderForm(main) {
     </div>
   `;
   main.appendChild(wrap);
+  const imgPicker = buildImagePicker(null);
+  wrap.querySelector('#img-picker-slot').replaceWith(imgPicker.el);
 
   document.getElementById('cancelBtn').onclick = () => { state.view = 'roster'; render(); };
   document.getElementById('saveBtn').onclick = () => {
@@ -627,6 +748,7 @@ function renderForm(main) {
     const character = {
       id: Date.now().toString(),
       nombre,
+      imagen: imgPicker.getValue(),
       apariencia: document.getElementById('f-apariencia').value.trim(),
       descripcion: document.getElementById('f-descripcion').value.trim(),
       etiquetas: document.getElementById('f-etiquetas').value.trim(),
@@ -704,7 +826,7 @@ function renderChat(main) {
   const wrap = document.createElement('div');
   wrap.innerHTML = `
     <div class="chat-header">
-      <div class="sigil" style="width:32px;height:32px;background:${sigilColor(c.nombre)}"></div>
+      <div class="sigil" style="width:32px;height:32px;background:${sigilColor(c.nombre)}">${c.imagen ? `<img src="${c.imagen}">` : ''}</div>
       <div class="name">${escapeHtml(c.nombre)}</div>
     </div>
     <div class="chat-log" id="chatLog"></div>
