@@ -310,7 +310,7 @@
     <div class="eyebrow">Códice · fichas de personaje</div>
     <div class="header-row">
       <h1 id="headerTitle">Tu bestiario</h1>
-      <button class="persona-btn" id="personaBtn" title="Sé quien quieras">◈ Tú</button>
+      <button class="persona-btn" id="personaBtn" title="Tus personas">◈ Personas</button>
     </div>
   </header>
   <main id="main"></main>
@@ -321,12 +321,13 @@
 const WORKER_URL = "https://codice-proxy.danieltolaba487.workers.dev";
 
 const state = {
-  view: 'roster', // roster | form | worldForm | persona | chat
+  view: 'roster', // roster | form | worldForm | worldChat | personas | personaForm | chat
   rosterTab: 'characters', // characters | worlds
   characters: [],
   worlds: [],
+  personas: [], // [{ id, nombre, tipo, genero, edad, apariencia, descripcion, gustos, disgustos, imagen }]
+  activePersonaId: null,
   activeId: null,
-  userPersona: null, // { nombre, tipo, apariencia, descripcion }
 };
 
 // --- Guardado permanente en el teléfono (localStorage) ---
@@ -337,7 +338,8 @@ function saveState() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       characters: state.characters,
       worlds: state.worlds,
-      userPersona: state.userPersona,
+      personas: state.personas,
+      activePersonaId: state.activePersonaId,
     }));
   } catch (err) {
     console.error('No se pudo guardar:', err);
@@ -362,8 +364,16 @@ function loadState() {
     if (raw) {
       const data = JSON.parse(raw);
       state.characters = data.characters || [];
-      state.worlds = data.worlds || [];
-      state.userPersona = data.userPersona || null;
+      state.worlds = (data.worlds || []).map(w => ({ messages: [], ...w }));
+      if (data.personas) {
+        state.personas = data.personas;
+        state.activePersonaId = data.activePersonaId || null;
+      } else if (data.userPersona) {
+        // Migración: versión anterior solo tenía una persona sin lista
+        const migrated = { id: Date.now().toString(), ...data.userPersona };
+        state.personas = [migrated];
+        state.activePersonaId = migrated.id;
+      }
     }
   } catch (err) {
     console.error('No se pudo cargar lo guardado:', err);
@@ -378,13 +388,16 @@ function loadState() {
       if (v.view === 'chat' && state.characters.some(c => c.id === v.activeId)) {
         state.view = 'chat';
         state.activeId = v.activeId;
+      } else if (v.view === 'worldChat' && state.worlds.some(w => w.id === v.activeId)) {
+        state.view = 'worldChat';
+        state.activeId = v.activeId;
       } else if (v.view === 'worldForm' && state.worlds.some(w => w.id === v.activeId)) {
         state.view = 'worldForm';
         state.activeId = v.activeId;
-      } else if (v.view === 'persona') {
-        state.view = 'persona';
+      } else if (v.view === 'personas') {
+        state.view = 'personas';
       }
-      // Para 'form' (crear personaje) no restauramos: no tiene datos guardables a medio llenar.
+      // Para 'form'/'personaForm' (crear algo nuevo) no restauramos: no hay datos a medio llenar.
     }
   } catch (err) { /* no crítico */ }
 }
@@ -462,8 +475,8 @@ function render() {
   const main = document.getElementById('main');
   const title = document.getElementById('headerTitle');
   const personaBtn = document.getElementById('personaBtn');
-  personaBtn.classList.toggle('set', !!state.userPersona);
-  personaBtn.onclick = () => { state.view = 'persona'; render(); };
+  personaBtn.classList.toggle('set', state.personas.length > 0);
+  personaBtn.onclick = () => { state.view = 'personas'; render(); };
   main.innerHTML = '';
 
   if (state.view === 'roster') {
@@ -473,10 +486,16 @@ function render() {
     title.textContent = 'Nueva ficha';
     renderForm(main);
   } else if (state.view === 'worldForm') {
-    title.textContent = 'Nuevo mundo';
+    title.textContent = 'Editar mundo';
     renderWorldForm(main);
-  } else if (state.view === 'persona') {
-    title.textContent = 'Tu personaje';
+  } else if (state.view === 'worldChat') {
+    title.textContent = 'Dentro del mundo';
+    renderWorldChat(main);
+  } else if (state.view === 'personas') {
+    title.textContent = 'Tus personas';
+    renderPersonasList(main);
+  } else if (state.view === 'personaForm') {
+    title.textContent = 'Editar persona';
     renderPersonaForm(main);
   } else if (state.view === 'chat') {
     title.textContent = 'En conversación';
@@ -495,12 +514,15 @@ function renderRoster(main) {
   tabs.querySelector('#tabChars').onclick = () => { state.rosterTab = 'characters'; render(); };
   tabs.querySelector('#tabWorlds').onclick = () => { state.rosterTab = 'worlds'; render(); };
 
-  if (state.userPersona && state.rosterTab === 'characters') {
-    const banner = document.createElement('div');
-    banner.className = 'persona-banner';
-    banner.innerHTML = `Interactuando como <b>${escapeHtml(state.userPersona.nombre)}</b><span id="editPersona">editar</span>`;
-    main.appendChild(banner);
-    banner.querySelector('#editPersona').onclick = () => { state.view = 'persona'; render(); };
+  if (state.activePersonaId && state.rosterTab === 'characters') {
+    const activePersona = state.personas.find(p => p.id === state.activePersonaId);
+    if (activePersona) {
+      const banner = document.createElement('div');
+      banner.className = 'persona-banner';
+      banner.innerHTML = `Interactuando como <b>${escapeHtml(activePersona.nombre)}</b><span id="editPersona">cambiar</span>`;
+      main.appendChild(banner);
+      banner.querySelector('#editPersona').onclick = () => { state.view = 'personas'; render(); };
+    }
   }
 
   if (state.rosterTab === 'worlds') {
@@ -525,11 +547,18 @@ function renderRoster(main) {
           <div class="name">${escapeHtml(c.nombre)}</div>
           <div class="sub">${escapeHtml(c.etiquetas || 'sin etiquetas')}${c.worldId ? ' · ◇ ' + escapeHtml((state.worlds.find(w => w.id === c.worldId) || {}).nombre || '') : ''}</div>
         </div>
+        <button class="delete-btn edit-btn" title="Editar">✎</button>
         <button class="delete-btn" title="Eliminar">🗑</button>
         <div class="arrow">→</div>
       `;
       item.onclick = () => { state.activeId = c.id; state.view = 'chat'; render(); };
-      item.querySelector('.delete-btn').onclick = (e) => {
+      item.querySelector('.edit-btn').onclick = (e) => {
+        e.stopPropagation();
+        state.activeId = c.id;
+        state.view = 'form';
+        render();
+      };
+      item.querySelector('.delete-btn:not(.edit-btn)').onclick = (e) => {
         e.stopPropagation();
         if (confirm(`¿Eliminar a ${c.nombre}? Esto borra también su conversación.`)) {
           state.characters = state.characters.filter(x => x.id !== c.id);
@@ -566,9 +595,26 @@ function renderWorldsList(main) {
           <div class="name">${escapeHtml(w.nombre)}</div>
           <div class="sub">${escapeHtml(w.epoca || '—')} · ${escapeHtml(w.etiquetas || 'sin etiquetas')}</div>
         </div>
-        <div class="arrow">✎</div>
+        <button class="delete-btn edit-btn" title="Editar">✎</button>
+        <button class="delete-btn" title="Eliminar">🗑</button>
+        <div class="arrow">→</div>
       `;
-      item.onclick = () => { state.activeId = w.id; state.view = 'worldForm'; render(); };
+      item.onclick = () => { state.activeId = w.id; state.view = 'worldChat'; render(); };
+      item.querySelector('.edit-btn').onclick = (e) => {
+        e.stopPropagation();
+        state.activeId = w.id;
+        state.view = 'worldForm';
+        render();
+      };
+      item.querySelector('.delete-btn:not(.edit-btn)').onclick = (e) => {
+        e.stopPropagation();
+        if (confirm(`¿Eliminar el mundo "${w.nombre}"? Los personajes vinculados quedarán sin mundo.`)) {
+          state.worlds = state.worlds.filter(x => x.id !== w.id);
+          state.characters.forEach(c => { if (c.worldId === w.id) c.worldId = null; });
+          saveState();
+          render();
+        }
+      };
       roster.appendChild(item);
     });
     main.appendChild(roster);
@@ -628,7 +674,7 @@ function renderWorldForm(main) {
     if (editing) {
       Object.assign(editing, data);
     } else {
-      state.worlds.push({ id: Date.now().toString(), ...data });
+      state.worlds.push({ id: Date.now().toString(), messages: [], ...data });
     }
     saveState();
     state.view = 'roster';
@@ -644,22 +690,74 @@ function renderWorldForm(main) {
   };
 }
 
+function renderPersonasList(main) {
+  const intro = document.createElement('p');
+  intro.style.cssText = "font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--gold);margin-bottom:16px;line-height:1.6;";
+  intro.textContent = 'Crea tantas personas como quieras: un hombre, una mujer, un animal, un híbrido, un monstruo... Marca cuál está activa para usarla en tus conversaciones.';
+  main.appendChild(intro);
+
+  if (state.personas.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.innerHTML = `<div style="font-size:32px;">◈</div><p>Aún no has creado ninguna persona. Crea la primera con el botón +</p>`;
+    main.appendChild(empty);
+  } else {
+    const roster = document.createElement('div');
+    roster.className = 'roster';
+    state.personas.forEach(p => {
+      const active = p.id === state.activePersonaId;
+      const item = document.createElement('div');
+      item.className = 'roster-item';
+      item.innerHTML = `
+        <div class="sigil" style="background:${sigilColor(p.nombre)}">${p.imagen ? `<img src="${p.imagen}">` : ''}</div>
+        <div class="meta">
+          <div class="name">${escapeHtml(p.nombre)} ${active ? ' · ✓ activa' : ''}</div>
+          <div class="sub">${escapeHtml(p.tipo || 'sin raza especificada')}</div>
+        </div>
+        <button class="delete-btn edit-btn" title="Editar">✎</button>
+        <button class="delete-btn" title="Eliminar">🗑</button>
+      `;
+      item.onclick = () => { state.activePersonaId = p.id; saveState(); render(); };
+      item.querySelector('.edit-btn').onclick = (e) => {
+        e.stopPropagation();
+        state.activeId = p.id;
+        state.view = 'personaForm';
+        render();
+      };
+      item.querySelector('.delete-btn:not(.edit-btn)').onclick = (e) => {
+        e.stopPropagation();
+        if (confirm(`¿Eliminar la persona "${p.nombre}"?`)) {
+          state.personas = state.personas.filter(x => x.id !== p.id);
+          if (state.activePersonaId === p.id) state.activePersonaId = state.personas[0]?.id || null;
+          saveState();
+          render();
+        }
+      };
+      roster.appendChild(item);
+    });
+    main.appendChild(roster);
+  }
+  const fab = document.createElement('button');
+  fab.className = 'fab';
+  fab.textContent = '+';
+  fab.onclick = () => { state.activeId = null; state.view = 'personaForm'; render(); };
+  main.appendChild(fab);
+}
+
 function renderPersonaForm(main) {
+  const editing = state.personas.find(p => p.id === state.activeId);
   const back = document.createElement('div');
   back.className = 'back';
   back.innerHTML = '← volver';
-  back.onclick = () => { state.view = 'roster'; render(); };
+  back.onclick = () => { state.view = 'personas'; render(); };
   main.appendChild(back);
 
-  const p = state.userPersona || {};
+  const p = editing || {};
   const wrap = document.createElement('div');
   wrap.innerHTML = `
-    <p style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--gold);margin-bottom:18px;line-height:1.6;">
-      Sé quien quieras: un hombre, una mujer, un animal, un híbrido, un semi-humano, un monstruo... lo que imagines. Así es como los personajes te van a ver a ti.
-    </p>
     <div class="field">
-      <label>¿Quién eres tú en las conversaciones?</label>
-      <input id="p-nombre" placeholder="Nombre de tu personaje" value="${escapeHtml(p.nombre || '')}">
+      <label>Nombre de esta persona</label>
+      <input id="p-nombre" placeholder="Nombre" value="${escapeHtml(p.nombre || '')}">
     </div>
     <div id="img-picker-slot"></div>
     <div class="field"><label>Raza</label><input id="p-tipo" placeholder="Ej. humano, animal, híbrido, semi-humano, monstruo, licántropo, dragón..." value="${escapeHtml(p.tipo || '')}"></div>
@@ -675,11 +773,8 @@ function renderPersonaForm(main) {
     </div>
     <div class="btn-row">
       <button class="btn btn-primary" id="savePersonaBtn">Guardar</button>
-      ${state.userPersona ? '<button class="btn btn-ghost" id="clearPersonaBtn">Quitar personaje</button>' : ''}
+      ${editing ? '<button class="btn btn-ghost" id="deletePersonaBtn">Eliminar</button>' : ''}
     </div>
-    <p style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--bone-dim);margin-top:14px;line-height:1.6;">
-      Esta ficha se usa en TODAS tus conversaciones: los personajes sabrán que eres tú, no "el usuario" genérico. Déjala vacía y guarda sin nombre si prefieres no usar esta función.
-    </p>
   `;
   main.appendChild(wrap);
   const imgPicker = buildImagePicker(p.imagen || null);
@@ -687,27 +782,37 @@ function renderPersonaForm(main) {
 
   document.getElementById('savePersonaBtn').onclick = () => {
     const nombre = document.getElementById('p-nombre').value.trim();
-    if (!nombre) {
-      state.userPersona = null;
+    if (!nombre) { alert('El nombre es obligatorio.'); return; }
+    const data = {
+      nombre,
+      imagen: imgPicker.getValue(),
+      tipo: document.getElementById('p-tipo').value.trim(),
+      genero: document.getElementById('p-genero').value.trim(),
+      edad: document.getElementById('p-edad').value.trim(),
+      apariencia: document.getElementById('p-apariencia').value.trim(),
+      descripcion: document.getElementById('p-descripcion').value.trim(),
+      gustos: document.getElementById('p-gustos').value.trim(),
+      disgustos: document.getElementById('p-disgustos').value.trim(),
+    };
+    if (editing) {
+      Object.assign(editing, data);
     } else {
-      state.userPersona = {
-        nombre,
-        imagen: imgPicker.getValue(),
-        tipo: document.getElementById('p-tipo').value.trim(),
-        genero: document.getElementById('p-genero').value.trim(),
-        edad: document.getElementById('p-edad').value.trim(),
-        apariencia: document.getElementById('p-apariencia').value.trim(),
-        descripcion: document.getElementById('p-descripcion').value.trim(),
-        gustos: document.getElementById('p-gustos').value.trim(),
-        disgustos: document.getElementById('p-disgustos').value.trim(),
-      };
+      const created = { id: Date.now().toString(), ...data };
+      state.personas.push(created);
+      if (!state.activePersonaId) state.activePersonaId = created.id;
     }
     saveState();
-    state.view = 'roster';
+    state.view = 'personas';
     render();
   };
-  const clearBtn = document.getElementById('clearPersonaBtn');
-  if (clearBtn) clearBtn.onclick = () => { state.userPersona = null; saveState(); state.view = 'roster'; render(); };
+  const delBtn = document.getElementById('deletePersonaBtn');
+  if (delBtn) delBtn.onclick = () => {
+    state.personas = state.personas.filter(x => x.id !== editing.id);
+    if (state.activePersonaId === editing.id) state.activePersonaId = state.personas[0]?.id || null;
+    saveState();
+    state.view = 'personas';
+    render();
+  };
 }
 
 function renderForm(main) {
@@ -717,19 +822,21 @@ function renderForm(main) {
   back.onclick = () => { state.view = 'roster'; render(); };
   main.appendChild(back);
 
+  const editing = state.characters.find(c => c.id === state.activeId);
+  const cd = editing || {};
   const wrap = document.createElement('div');
   wrap.innerHTML = `
-    <div class="field"><label>Nombre</label><input id="f-nombre" placeholder="Ej. Sigurd Kolbjørnsen"></div>
+    <div class="field"><label>Nombre</label><input id="f-nombre" placeholder="Ej. Sigurd Kolbjørnsen" value="${escapeHtml(cd.nombre || '')}"></div>
     <div id="img-picker-slot"></div>
-    <div class="field"><label>Apariencia</label><textarea id="f-apariencia" rows="3" placeholder="Rasgos físicos distintivos, complexión, altura en metros..."></textarea></div>
-    <div class="field"><label>Descripción</label><textarea id="f-descripcion" rows="4" placeholder="Personalidad, historia, contradicciones..."></textarea></div>
-    <div class="field"><label>Saludo inicial</label><textarea id="f-saludo" rows="2" placeholder="Lo primero que dice tu personaje al empezar a hablar contigo..."></textarea></div>
-    <div class="field"><label>Etiquetas</label><input id="f-etiquetas" placeholder="fantasía, híbrido, inmortal..."></div>
+    <div class="field"><label>Apariencia</label><textarea id="f-apariencia" rows="3" placeholder="Rasgos físicos distintivos, complexión, altura en metros...">${escapeHtml(cd.apariencia || '')}</textarea></div>
+    <div class="field"><label>Descripción</label><textarea id="f-descripcion" rows="4" placeholder="Personalidad, historia, contradicciones...">${escapeHtml(cd.descripcion || '')}</textarea></div>
+    <div class="field"><label>Saludo inicial</label><textarea id="f-saludo" rows="2" placeholder="Lo primero que dice tu personaje al empezar a hablar contigo...">${escapeHtml(cd.saludo || '')}</textarea></div>
+    <div class="field"><label>Etiquetas</label><input id="f-etiquetas" placeholder="fantasía, híbrido, inmortal..." value="${escapeHtml(cd.etiquetas || '')}"></div>
     <div class="field">
       <label>Mundo (opcional)</label>
       <select id="f-mundo">
         <option value="">— Sin mundo específico —</option>
-        ${state.worlds.map(w => `<option value="${w.id}">${escapeHtml(w.nombre)}</option>`).join('')}
+        ${state.worlds.map(w => `<option value="${w.id}" ${cd.worldId === w.id ? 'selected' : ''}>${escapeHtml(w.nombre)}</option>`).join('')}
       </select>
     </div>
     <div class="btn-row">
@@ -738,15 +845,14 @@ function renderForm(main) {
     </div>
   `;
   main.appendChild(wrap);
-  const imgPicker = buildImagePicker(null);
+  const imgPicker = buildImagePicker(cd.imagen || null);
   wrap.querySelector('#img-picker-slot').replaceWith(imgPicker.el);
 
   document.getElementById('cancelBtn').onclick = () => { state.view = 'roster'; render(); };
   document.getElementById('saveBtn').onclick = () => {
     const nombre = document.getElementById('f-nombre').value.trim();
     if (!nombre) { alert('El nombre es obligatorio.'); return; }
-    const character = {
-      id: Date.now().toString(),
+    const data = {
       nombre,
       imagen: imgPicker.getValue(),
       apariencia: document.getElementById('f-apariencia').value.trim(),
@@ -754,13 +860,33 @@ function renderForm(main) {
       etiquetas: document.getElementById('f-etiquetas').value.trim(),
       saludo: document.getElementById('f-saludo').value.trim(),
       worldId: document.getElementById('f-mundo').value || null,
-      messages: [],
     };
-    state.characters.push(character);
+    if (editing) {
+      Object.assign(editing, data);
+    } else {
+      state.characters.push({ id: Date.now().toString(), ...data, messages: [] });
+    }
     saveState();
     state.view = 'roster';
     render();
   };
+}
+
+function personaPromptBlock() {
+  const p = state.personas.find(x => x.id === state.activePersonaId);
+  if (!p) return '';
+  return `
+
+La persona con la que hablas NO es "el usuario" genérico — es otro personaje dentro de esta historia:
+- Nombre: ${p.nombre}
+- Raza: ${p.tipo || 'no especificada'}
+- Género: ${p.genero || 'no especificado'}
+- Edad: ${p.edad || 'no especificada'}
+- Apariencia: ${p.apariencia || 'no especificada'}
+- Descripción/personalidad: ${p.descripcion || 'no especificada'}
+- Gustos: ${p.gustos || 'no especificados'}
+- Disgustos: ${p.disgustos || 'no especificados'}
+Dirígete a esta persona por su nombre y trátala como a ese personaje, no como a un usuario externo.`;
 }
 
 function buildSystemPrompt(c) {
@@ -787,21 +913,7 @@ ${w.prompt}`;
     }
   }
 
-  if (state.userPersona) {
-    const p = state.userPersona;
-    prompt += `
-
-La persona con la que hablas NO es "el usuario" genérico — es otro personaje dentro de esta historia:
-- Nombre: ${p.nombre}
-- Raza: ${p.tipo || 'no especificada'}
-- Género: ${p.genero || 'no especificado'}
-- Edad: ${p.edad || 'no especificada'}
-- Apariencia: ${p.apariencia || 'no especificada'}
-- Descripción/personalidad: ${p.descripcion || 'no especificada'}
-- Gustos: ${p.gustos || 'no especificados'}
-- Disgustos: ${p.disgustos || 'no especificados'}
-Dirígete a esta persona por su nombre y trátala como a ese personaje, no como a un usuario externo.`;
-  }
+  prompt += personaPromptBlock();
 
   prompt += `
 
@@ -813,21 +925,48 @@ Mantén las respuestas breves y naturales, como en una conversación real. No ro
   return prompt;
 }
 
-function renderChat(main) {
-  const c = state.characters.find(x => x.id === state.activeId);
-  if (!c) { state.view = 'roster'; render(); return; }
+// Prompt para chatear directamente con un MUNDO (sin un personaje específico):
+// la IA actúa como narrador de ese mundo.
+function buildWorldSystemPrompt(w) {
+  let prompt = `Eres el Narrador de un mundo interactivo. Describes en segunda o tercera persona lo que ocurre a partir de las acciones de la persona, y das vida a cualquier personaje o NPC que aparezca en la escena, todo en español.
 
+Ficha del mundo:
+- Nombre: ${w.nombre}
+- Época/ambientación: ${w.epoca || 'no especificada'}
+- Descripción: ${w.descripcion || 'no especificada'}`;
+
+  if (w.prompt) prompt += `
+
+Instrucciones adicionales de este mundo (máxima prioridad, síguelas al pie de la letra):
+${w.prompt}`;
+
+  prompt += personaPromptBlock();
+
+  prompt += `
+
+Mantén las respuestas breves y evocadoras, como un narrador de rol. No menciones que eres una IA.`;
+
+  if (w.escena) {
+    prompt += ` Nota: la persona ya vio la escena de apertura antes de escribirte — no la repitas, continúa desde ahí de forma natural.`;
+  }
+  return prompt;
+}
+
+// --- Chat compartido (sirve tanto para personajes como para mundos) ---
+// entity: el personaje o mundo (debe tener .nombre, .imagen, .messages)
+// options: { backLabel, backView, systemPrompt, emptyGreeting }
+function renderGenericChat(main, entity, options) {
   const back = document.createElement('div');
   back.className = 'back';
-  back.innerHTML = '← al bestiario';
-  back.onclick = () => { state.view = 'roster'; render(); };
+  back.innerHTML = `← ${options.backLabel}`;
+  back.onclick = () => { state.view = options.backView; render(); };
   main.appendChild(back);
 
   const wrap = document.createElement('div');
   wrap.innerHTML = `
     <div class="chat-header">
-      <div class="sigil" style="width:32px;height:32px;background:${sigilColor(c.nombre)}">${c.imagen ? `<img src="${c.imagen}">` : ''}</div>
-      <div class="name">${escapeHtml(c.nombre)}</div>
+      <div class="sigil" style="width:32px;height:32px;background:${sigilColor(entity.nombre)}">${entity.imagen ? `<img src="${entity.imagen}">` : ''}</div>
+      <div class="name">${escapeHtml(entity.nombre)}</div>
     </div>
     <div class="chat-log" id="chatLog"></div>
     <div class="chat-input">
@@ -837,7 +976,7 @@ function renderChat(main) {
   `;
   main.appendChild(wrap);
 
-  renderMessages(c);
+  renderMessages(entity, options);
 
   const input = document.getElementById('chatInput');
   const sendBtn = document.getElementById('sendBtn');
@@ -845,16 +984,16 @@ function renderChat(main) {
   async function send() {
     const text = input.value.trim();
     if (!text) return;
-    c.messages.push({ role: 'user', content: text });
+    entity.messages.push({ role: 'user', content: text });
     saveState();
     input.value = '';
-    renderMessages(c);
+    renderMessages(entity, options);
     sendBtn.disabled = true;
 
     const log = document.getElementById('chatLog');
     const thinkingEl = document.createElement('div');
     thinkingEl.className = 'bubble char thinking';
-    thinkingEl.textContent = `${c.nombre} está escribiendo...`;
+    thinkingEl.textContent = `${entity.nombre} está escribiendo...`;
     log.appendChild(thinkingEl);
     log.scrollTop = log.scrollHeight;
 
@@ -865,51 +1004,74 @@ function renderChat(main) {
         body: JSON.stringify({
           model: "claude-sonnet-4-6",
           max_tokens: 1000,
-          system: buildSystemPrompt(c),
-          messages: c.messages.map(m => ({ role: m.role, content: m.content })),
+          system: options.systemPrompt(),
+          messages: entity.messages.map(m => ({ role: m.role, content: m.content })),
         })
       });
       const data = await response.json();
       const reply = data.choices && data.choices[0] ? data.choices[0].message.content : '(sin respuesta)';
-      c.messages.push({ role: 'assistant', content: reply });
+      entity.messages.push({ role: 'assistant', content: reply });
     } catch (err) {
-      c.messages.push({ role: 'assistant', content: '(error al conectar con la IA)' });
+      entity.messages.push({ role: 'assistant', content: '(error al conectar con la IA)' });
     }
     saveState();
     sendBtn.disabled = false;
-    renderMessages(c);
+    renderMessages(entity, options);
   }
 
   sendBtn.onclick = send;
   input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 }
 
-function renderMessages(c) {
+function renderChat(main) {
+  const c = state.characters.find(x => x.id === state.activeId);
+  if (!c) { state.view = 'roster'; render(); return; }
+  renderGenericChat(main, c, {
+    backLabel: 'al bestiario',
+    backView: 'roster',
+    systemPrompt: () => buildSystemPrompt(c),
+    emptyGreeting: c.saludo,
+  });
+}
+
+function renderWorldChat(main) {
+  const w = state.worlds.find(x => x.id === state.activeId);
+  if (!w) { state.view = 'roster'; render(); return; }
+  if (!w.messages) w.messages = [];
+  renderGenericChat(main, w, {
+    backLabel: 'a tus mundos',
+    backView: 'roster',
+    systemPrompt: () => buildWorldSystemPrompt(w),
+    emptyGreeting: null,
+  });
+}
+
+function renderMessages(entity, options) {
   const log = document.getElementById('chatLog');
   if (!log) return;
   log.innerHTML = '';
-  if (c.messages.length === 0) {
-    const world = c.worldId ? state.worlds.find(w => w.id === c.worldId) : null;
+  if (entity.messages.length === 0) {
+    const world = entity.worldId ? state.worlds.find(w => w.id === entity.worldId) : (entity.escena ? entity : null);
     if (world && world.escena) {
       const scene = document.createElement('div');
       scene.className = 'scene-bubble';
       scene.textContent = world.escena;
       log.appendChild(scene);
     }
-    if (c.saludo) {
+    if (options.emptyGreeting) {
       const greet = document.createElement('div');
       greet.className = 'bubble char';
-      greet.textContent = c.saludo;
+      greet.textContent = options.emptyGreeting;
       log.appendChild(greet);
     }
-    if (!world?.escena && !c.saludo) {
+    if (!world?.escena && !options.emptyGreeting) {
       const hint = document.createElement('div');
       hint.className = 'bubble char thinking';
-      hint.textContent = `Empieza la conversación con ${c.nombre}...`;
+      hint.textContent = `Empieza la conversación con ${entity.nombre}...`;
       log.appendChild(hint);
     }
   }
-  c.messages.forEach(m => {
+  entity.messages.forEach(m => {
     const b = document.createElement('div');
     b.className = 'bubble ' + (m.role === 'user' ? 'user' : 'char');
     b.textContent = m.content;
