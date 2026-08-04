@@ -343,6 +343,7 @@ function saveState() {
     }));
   } catch (err) {
     console.error('No se pudo guardar:', err);
+    alert('⚠️ No se pudo guardar el cambio — el almacenamiento del teléfono está lleno (probablemente por imágenes). Intenta eliminar alguna imagen o algún personaje/mundo con foto para liberar espacio.');
   }
 }
 
@@ -573,7 +574,7 @@ function renderRoster(main) {
   const fab = document.createElement('button');
   fab.className = 'fab';
   fab.textContent = '+';
-  fab.onclick = () => { state.view = 'form'; render(); };
+  fab.onclick = () => { state.activeId = null; state.view = 'form'; render(); };
   main.appendChild(fab);
 }
 
@@ -691,6 +692,12 @@ function renderWorldForm(main) {
 }
 
 function renderPersonasList(main) {
+  const back = document.createElement('div');
+  back.className = 'back';
+  back.innerHTML = '← volver';
+  back.onclick = () => { state.view = 'roster'; render(); };
+  main.appendChild(back);
+
   const intro = document.createElement('p');
   intro.style.cssText = "font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--gold);margin-bottom:16px;line-height:1.6;";
   intro.textContent = 'Crea tantas personas como quieras: un hombre, una mujer, un animal, un híbrido, un monstruo... Marca cuál está activa para usarla en tus conversaciones.';
@@ -831,6 +838,7 @@ function renderForm(main) {
     <div class="field"><label>Apariencia</label><textarea id="f-apariencia" rows="3" placeholder="Rasgos físicos distintivos, complexión, altura en metros...">${escapeHtml(cd.apariencia || '')}</textarea></div>
     <div class="field"><label>Descripción</label><textarea id="f-descripcion" rows="4" placeholder="Personalidad, historia, contradicciones...">${escapeHtml(cd.descripcion || '')}</textarea></div>
     <div class="field"><label>Saludo inicial</label><textarea id="f-saludo" rows="2" placeholder="Lo primero que dice tu personaje al empezar a hablar contigo...">${escapeHtml(cd.saludo || '')}</textarea></div>
+    <div class="field"><label>Estilo de habla</label><textarea id="f-estilo" rows="2" placeholder="Ej. respuestas largas, descriptivas y bien formuladas, con acotaciones de acción entre asteriscos; tono formal/casual; muletillas...">${escapeHtml(cd.estilo || '')}</textarea></div>
     <div class="field"><label>Etiquetas</label><input id="f-etiquetas" placeholder="fantasía, híbrido, inmortal..." value="${escapeHtml(cd.etiquetas || '')}"></div>
     <div class="field">
       <label>Mundo (opcional)</label>
@@ -859,6 +867,7 @@ function renderForm(main) {
       descripcion: document.getElementById('f-descripcion').value.trim(),
       etiquetas: document.getElementById('f-etiquetas').value.trim(),
       saludo: document.getElementById('f-saludo').value.trim(),
+      estilo: document.getElementById('f-estilo').value.trim(),
       worldId: document.getElementById('f-mundo').value || null,
     };
     if (editing) {
@@ -895,6 +904,7 @@ function buildSystemPrompt(c) {
 Ficha del personaje:
 - Apariencia: ${c.apariencia || 'no especificada'}
 - Descripción/personalidad: ${c.descripcion || 'no especificada'}
+- Estilo de habla: ${c.estilo || 'respuestas largas, descriptivas y bien formuladas — desarrolla la escena, no te limites a frases cortas'}
 - Etiquetas: ${c.etiquetas || 'ninguna'}`;
 
   if (c.worldId) {
@@ -915,9 +925,14 @@ ${w.prompt}`;
 
   prompt += personaPromptBlock();
 
+  if (c.summary) prompt += `
+
+Resumen de lo ocurrido en esta conversación hasta ahora (tenlo en cuenta como contexto, no lo repitas literalmente):
+${c.summary}`;
+
   prompt += `
 
-Mantén las respuestas breves y naturales, como en una conversación real. No rompas el personaje ni menciones que eres una IA.`;
+Escribe respuestas bien formuladas y con buena redacción, desarrollando la escena en detalle salvo que el "Estilo de habla" indique lo contrario. No rompas el personaje ni menciones que eres una IA.`;
 
   if (c.saludo || (c.worldId && state.worlds.find(w => w.id === c.worldId)?.escena)) {
     prompt += ` Nota: la persona ya vio la escena de apertura y/o tu saludo inicial antes de escribirte — no los repitas, continúa la conversación desde ahí de forma natural.`;
@@ -942,9 +957,14 @@ ${w.prompt}`;
 
   prompt += personaPromptBlock();
 
+  if (w.summary) prompt += `
+
+Resumen de lo ocurrido en esta conversación hasta ahora (tenlo en cuenta como contexto, no lo repitas literalmente):
+${w.summary}`;
+
   prompt += `
 
-Mantén las respuestas breves y evocadoras, como un narrador de rol. No menciones que eres una IA.`;
+Escribe respuestas bien formuladas, descriptivas y con buena redacción, desarrollando la escena en detalle — no te limites a frases cortas. No menciones que eres una IA.`;
 
   if (w.escena) {
     prompt += ` Nota: la persona ya vio la escena de apertura antes de escribirte — no la repitas, continúa desde ahí de forma natural.`;
@@ -997,15 +1017,19 @@ function renderGenericChat(main, entity, options) {
     log.appendChild(thinkingEl);
     log.scrollTop = log.scrollHeight;
 
+    await maybeSummarize(entity);
+    const startIdx = entity.summarizedUpTo || 0;
+    const payloadMessages = entity.messages.slice(startIdx).map(m => ({ role: m.role, content: m.content }));
+
     try {
       const response = await fetch(WORKER_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-6",
-          max_tokens: 1000,
+          max_tokens: 1800,
           system: options.systemPrompt(),
-          messages: entity.messages.map(m => ({ role: m.role, content: m.content })),
+          messages: payloadMessages,
         })
       });
       const data = await response.json();
@@ -1021,6 +1045,49 @@ function renderGenericChat(main, entity, options) {
 
   sendBtn.onclick = send;
   input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+}
+
+// --- Resumen automático de conversaciones largas ---
+// Cuando una conversación crece mucho, resume lo más viejo en un solo bloque
+// de texto (en vez de mandarlo todo siempre a la IA) para no saturar el
+// límite de contexto del modelo, y para que responda más rápido.
+const SUMMARY_THRESHOLD = 24; // mensajes sin resumir antes de disparar el resumen
+const SUMMARY_KEEP_RECENT = 12; // mensajes recientes que SIEMPRE se mandan completos
+
+async function maybeSummarize(entity) {
+  const startFrom = entity.summarizedUpTo || 0;
+  const total = entity.messages.length;
+  if (total - startFrom <= SUMMARY_THRESHOLD) return;
+
+  const toSummarize = entity.messages.slice(startFrom, total - SUMMARY_KEEP_RECENT);
+  if (toSummarize.length === 0) return;
+
+  const transcript = toSummarize
+    .map(m => (m.role === 'user' ? 'Persona: ' : `${entity.nombre}: `) + m.content)
+    .join('\n');
+
+  try {
+    const response = await fetch(WORKER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 400,
+        system: "Resume la siguiente conversación de rol de forma fiel y concisa, en tercera persona. Conserva hechos importantes, decisiones tomadas, y el estado emocional/relación entre los personajes. No inventes nada que no haya ocurrido. Máximo 200 palabras.",
+        messages: [{ role: "user", content: transcript }],
+      })
+    });
+    const data = await response.json();
+    const summaryText = data.choices && data.choices[0] ? data.choices[0].message.content : null;
+    if (summaryText) {
+      entity.summary = entity.summary ? entity.summary + '\n' + summaryText : summaryText;
+      entity.summarizedUpTo = total - SUMMARY_KEEP_RECENT;
+      saveState();
+    }
+  } catch (err) {
+    // Si falla el resumen no es grave: simplemente se manda el historial completo esta vez.
+    console.error('No se pudo resumir la conversación:', err);
+  }
 }
 
 function renderChat(main) {
